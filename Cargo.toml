@@ -10,3 +10,4 @@ edition = "2018"
 
 [dependencies]
 hidapi = "1.2.2"
+bytes = "0.5.4"
