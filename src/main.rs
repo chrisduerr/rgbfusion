@@ -187,16 +187,22 @@ struct Config {
     fade_in_time: Duration,
     fade_out_time: Duration,
     hold_time: Duration,
+    interactive: bool,
 }
 
 impl Config {
     fn from_cli(matches: &ArgMatches) -> Self {
         let mut config = Config::default();
 
-        config.zone = required_enum(matches, "zone", &Zone::variants());
+        // Determine if some parameters need to be read from STDIN.
+        config.interactive = !matches.is_present("zone")
+            || !matches.is_present("color")
+            || !matches.is_present("effect");
 
+        config.zone = required_enum(matches, "zone", &Zone::variants());
         config.color = required_color(matches);
 
+        // TODO: Check effect before color and skip color if effect == Off
         config.effect = required_enum(matches, "effect", &Effect::variants());
 
         replace_from_str(&mut config.max_brightness, matches, "max-brightness");
@@ -269,6 +275,7 @@ impl Default for Config {
             fade_in_time: Duration::default(),
             fade_out_time: Duration::default(),
             hold_time: Duration::default(),
+            interactive: false,
         }
     }
 }
@@ -353,16 +360,15 @@ fn zonetest() {
 fn rgbfusion(matches: &ArgMatches) {
     let config = Config::from_cli(matches);
 
-    // TODO: Omit if all options were specified as parameters already
-    println!(
-        "\x1b[32mConfiguration successful\x1b[0m, use the following command to skip it in the \
-         future:\n\n{}\n",
-        config
-    );
+    // Print CLI example to skip manual configuration.
+    if config.interactive {
+        println!("\x1b[32mConfiguration successful.\x1b[0m\n");
+        println!("To reapply this config, you can run the following command:\n\n{}\n", config);
+    }
 
     write_config(&config);
 
-    println!("\x1b[32mSuccessfully applied changes.\x1b[0m\n");
+    println!("\x1b[32mSuccessfully applied changes.\x1b[0m");
 }
 
 /// Write a config to the HID bus.
