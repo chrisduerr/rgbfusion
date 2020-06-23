@@ -10,11 +10,22 @@ use std::process::exit;
 use std::str::FromStr;
 
 use bytes::{BufMut, Bytes, BytesMut};
-use clap::{arg_enum, crate_description, crate_name, crate_version, App, Arg, ArgMatches};
+use clap::{
+    arg_enum, crate_description, crate_name, crate_version, App, Arg, ArgMatches, SubCommand,
+};
 use hidapi::HidApi;
 
 const VENDOR_ID: u16 = 0x048d;
 const PRODUCT_ID: u16 = 0x8297;
+
+const TESTCOLORS: [Rgb; 6] = [
+    Rgb { r: 0xff, g: 0x00, b: 0x00 },
+    Rgb { r: 0x00, g: 0xff, b: 0x00 },
+    Rgb { r: 0x00, g: 0x00, b: 0xff },
+    Rgb { r: 0xff, g: 0x00, b: 0xff },
+    Rgb { r: 0xff, g: 0xff, b: 0x00 },
+    Rgb { r: 0xff, g: 0xff, b: 0xff },
+];
 
 const fn apply_packet() -> [u8; 23] {
     let mut packet = [0; 23];
@@ -178,6 +189,26 @@ struct Config {
     hold_time: Duration,
 }
 
+impl Config {
+    fn from_cli(matches: &ArgMatches) -> Self {
+        let mut config = Config::default();
+
+        config.zone = required_enum(matches, "zone", &Zone::variants());
+
+        config.color = required_color(matches);
+
+        config.effect = required_enum(matches, "effect", &Effect::variants());
+
+        replace_from_str(&mut config.max_brightness, matches, "max-brightness");
+        replace_from_str(&mut config.min_brightness, matches, "min-brightness");
+        replace_from_str(&mut config.fade_in_time, matches, "fade-in-time");
+        replace_from_str(&mut config.fade_out_time, matches, "fade-out-time");
+        replace_from_str(&mut config.hold_time, matches, "hold-time");
+
+        config
+    }
+}
+
 impl AsBytes for Config {
     /// Convert config to RGB Fusion 2 HID packet.
     fn as_bytes(&self) -> Bytes {
@@ -283,10 +314,44 @@ impl Display for Config {
     }
 }
 
-// TODO: Add colortest mode to check zone
-//  -> Maybe even allow interactively selecting the zone?
 fn main() {
-    let config = cli();
+    let cli = cli();
+    match cli.subcommand_matches("zonetest") {
+        Some(_) => zonetest(),
+        None => rgbfusion(&cli),
+    }
+}
+
+/// Mark all zones in a unique color.
+fn zonetest() {
+    println!("Are you sure you want to test the available RGB zones?");
+    println!("\x1b[31mThis will reset your RGB Fusion configuration\x1b[0m.");
+    print!(" [y/N] > ");
+    let _ = io::stdout().flush();
+
+    // Abort unless the user agrees to reset their config.
+    if stdin_nextline().to_lowercase() != "y" {
+        println!("Bailing out.");
+        return;
+    }
+
+    println!("\nTesting available RGB zones...\n");
+
+    for (i, zone) in Zone::variants().iter().enumerate() {
+        let zone = Zone::from_str(zone).unwrap();
+        let color = TESTCOLORS[i];
+
+        println!("Color for zone '{}': {}", zone, color);
+
+        let config = Config { zone, color, ..Default::default() };
+
+        write_config(&config);
+    }
+}
+
+/// Update RGB Fusion 2 configuration.
+fn rgbfusion(matches: &ArgMatches) {
+    let config = Config::from_cli(matches);
 
     // TODO: Omit if all options were specified as parameters already
     println!(
@@ -295,6 +360,13 @@ fn main() {
         config
     );
 
+    write_config(&config);
+
+    println!("\x1b[32mSuccessfully applied changes.\x1b[0m\n");
+}
+
+/// Write a config to the HID bus.
+fn write_config(config: &Config) {
     let api = HidApi::new().expect("unable to access HID");
     let device = match api.open(VENDOR_ID, PRODUCT_ID) {
         Ok(device) => device,
@@ -308,16 +380,15 @@ fn main() {
     if let Err(err) = device.write(&apply_packet()) {
         die!("unable to apply new config: {}", err);
     }
-
-    println!("\x1b[32mSuccessfully applied changes.\x1b[0m\n");
 }
 
-/// Read config from command line.
-fn cli() -> Config {
-    let matches = App::new(crate_name!())
+/// Get clap CLI parameters.
+fn cli() -> ArgMatches<'static> {
+    App::new(crate_name!())
         .version(crate_version!())
         .author("Christian Duerr <contact@christianduerr.com>")
         .about(crate_description!())
+        .subcommand(SubCommand::with_name("zonetest").about("Test available RGB zones"))
         .arg(
             Arg::with_name("color")
                 .help("LED color in RGB [0xRRGGBB]")
@@ -374,23 +445,7 @@ fn cli() -> Config {
                 .takes_value(true)
                 .case_insensitive(true),
         )
-        .get_matches();
-
-    let mut config = Config::default();
-
-    config.zone = required_enum(&matches, "zone", &Zone::variants());
-
-    config.color = required_color(&matches);
-
-    config.effect = required_enum(&matches, "effect", &Effect::variants());
-
-    replace_from_str(&mut config.max_brightness, &matches, "max-brightness");
-    replace_from_str(&mut config.min_brightness, &matches, "min-brightness");
-    replace_from_str(&mut config.fade_in_time, &matches, "fade-in-time");
-    replace_from_str(&mut config.fade_out_time, &matches, "fade-out-time");
-    replace_from_str(&mut config.hold_time, &matches, "hold-time");
-
-    config
+        .get_matches()
 }
 
 /// Convert a CLI option from the parameter string.
@@ -479,4 +534,14 @@ fn stdin_nextline() -> String {
     input = input.trim().to_string();
 
     input
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn testcolors_match_zones() {
+        assert_eq!(Zone::variants().len(), TESTCOLORS.len());
+    }
 }
