@@ -27,6 +27,7 @@ const TESTCOLORS: [Rgb; 6] = [
     Rgb { r: 0xff, g: 0xff, b: 0xff },
 ];
 
+/// Packet to apply last submitted configuration.
 const fn apply_packet() -> [u8; 23] {
     let mut packet = [0; 23];
     packet[0] = 0xcc;
