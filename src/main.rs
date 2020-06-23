@@ -9,7 +9,7 @@ use std::num::ParseIntError;
 use std::process::exit;
 use std::str::FromStr;
 
-use bytes::{BufMut, BytesMut};
+use bytes::{BufMut, Bytes, BytesMut};
 use clap::{arg_enum, crate_description, crate_name, crate_version, App, Arg, ArgMatches};
 use hidapi::HidApi;
 
@@ -29,6 +29,11 @@ macro_rules! die {
         eprintln!($($arg)*);
         exit(1);
     }}
+}
+
+/// Convert to RGB Fusion 2 packet format.
+trait AsBytes {
+    fn as_bytes(&self) -> Bytes;
 }
 
 arg_enum! {
@@ -56,7 +61,7 @@ arg_enum! {
     }
 }
 
-/// TODO: Doc
+/// RGB color.
 #[derive(Default, Debug, Copy, Clone)]
 struct Rgb {
     r: u8,
@@ -95,15 +100,20 @@ impl Display for Rgb {
 }
 
 /// LED brightness.
-#[derive(Copy, Clone)]
+#[derive(Default, PartialEq, Eq, Copy, Clone)]
 struct Brightness(u8);
 
 impl Brightness {
-    // TODO: Make this a trait?
-    //
-    /// Convert format from 0..=255 to the protocol's range 0..=90.
-    fn as_byte(self) -> u8 {
-        (0x5a * self.0 as u16 / u8::max_value() as u16) as u8
+    const fn max_value() -> Self {
+        Self(u8::max_value())
+    }
+}
+
+impl AsBytes for Brightness {
+    fn as_bytes(&self) -> Bytes {
+        // Convert format from 0..=255 to the protocol's range 0..=90.
+        let byte = (0x5a * self.0 as u16 / u8::max_value() as u16) as u8;
+        Bytes::copy_from_slice(&[byte])
     }
 }
 
@@ -122,15 +132,23 @@ impl Display for Brightness {
 }
 
 /// Duration in milliseconds.
-#[derive(Copy, Clone)]
+#[derive(PartialEq, Eq, Copy, Clone)]
 struct Duration(u16);
 
-impl Duration {
-    // TODO: Make this a trait?
-    //
-    /// Convert from milliseconds to quarter seconds.
-    fn as_bytes(self) -> u16 {
-        self.0 / 250
+impl Default for Duration {
+    fn default() -> Self {
+        Self(100)
+    }
+}
+
+impl AsBytes for Duration {
+    fn as_bytes(&self) -> Bytes {
+        let mut bytes = BytesMut::with_capacity(2);
+
+        // Convert from milliseconds to quarter seconds.
+        bytes.put_u16(self.0 / 250);
+
+        bytes.freeze()
     }
 }
 
@@ -160,11 +178,9 @@ struct Config {
     hold_time: Duration,
 }
 
-impl Config {
-    // TODO: Make this a trait?
-    //
+impl AsBytes for Config {
     /// Convert config to RGB Fusion 2 HID packet.
-    fn as_bytes(&self) -> BytesMut {
+    fn as_bytes(&self) -> Bytes {
         let mut buf = BytesMut::new();
 
         // Report ID.
@@ -180,10 +196,10 @@ impl Config {
         buf.put_u8(self.effect as u8);
 
         // Max Brightness.
-        buf.put_u8(self.max_brightness.as_byte());
+        buf.put_slice(&self.max_brightness.as_bytes());
 
         // Min Brightness.
-        buf.put_u8(self.min_brightness.as_byte());
+        buf.put_slice(&self.min_brightness.as_bytes());
 
         // Primary color Data.
         buf.put_u8(self.color.b);
@@ -200,14 +216,14 @@ impl Config {
         buf.put_u8(0);
 
         // Color effect timings.
-        buf.put_u16(self.fade_in_time.as_bytes());
-        buf.put_u16(self.fade_out_time.as_bytes());
-        buf.put_u16(self.hold_time.as_bytes());
+        buf.put_slice(&self.fade_in_time.as_bytes());
+        buf.put_slice(&self.fade_out_time.as_bytes());
+        buf.put_slice(&self.hold_time.as_bytes());
 
         // Padding for minimum packet size.
         buf.put_slice(&[0; 3]);
 
-        buf
+        buf.freeze()
     }
 }
 
@@ -216,12 +232,12 @@ impl Default for Config {
         Self {
             zone: Zone::IO,
             effect: Effect::Static,
-            max_brightness: Brightness(255),
-            min_brightness: Brightness(0),
+            max_brightness: Brightness::max_value(),
+            min_brightness: Brightness::default(),
             color: Rgb::default(),
-            fade_in_time: Duration(100),
-            fade_out_time: Duration(100),
-            hold_time: Duration(100),
+            fade_in_time: Duration::default(),
+            fade_out_time: Duration::default(),
+            hold_time: Duration::default(),
         }
     }
 }
@@ -229,28 +245,41 @@ impl Default for Config {
 impl Display for Config {
     #[rustfmt::skip]
     fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
-        // TODO: Omit optional parameters matching the defaults
+        // Add all required parameters.
         write!(
             f,
-            "  {} \\\n    \
-            --zone {} \\\n    \
-            --color {} \\\n    \
-            --effect {} \\\n    \
-            --max-brightness {} \\\n    \
-            --min-brightness {} \\\n    \
-            --fade-in-time {} \\\n    \
-            --fade-out-time {} \\\n    \
-            --hold-time {}",
+            "{} \\\n  \
+            --zone {} \\\n  \
+            --color {} \\\n  \
+            --effect {}",
             crate_name!(),
             self.zone,
             self.color,
             self.effect,
-            self.max_brightness,
-            self.min_brightness,
-            self.fade_in_time,
-            self.fade_out_time,
-            self.hold_time
-        )
+        )?;
+
+        // Add optional parameters only if present.
+        if self.max_brightness != Brightness::max_value() {
+            write!(f, " \\\n  --max-brightness {}", self.max_brightness)?;
+        }
+
+        if self.min_brightness != Brightness::default() {
+            write!(f, " \\\n  --min-brightness {}", self.min_brightness)?;
+        }
+
+        if self.fade_in_time != Duration::default() {
+            write!(f, " \\\n  --fade-in-time {}", self.fade_in_time)?;
+        }
+
+        if self.fade_out_time != Duration::default() {
+            write!(f, " \\\n  --fade-out-time {}", self.fade_out_time)?;
+        }
+
+        if self.hold_time != Duration::default() {
+            write!(f, " \\\n  --hold-time {}", self.hold_time)?;
+        }
+
+        Ok(())
     }
 }
 
@@ -258,6 +287,13 @@ impl Display for Config {
 //  -> Maybe even allow interactively selecting the zone?
 fn main() {
     let config = cli();
+
+    // TODO: Omit if all options were specified as parameters already
+    println!(
+        "\x1b[32mConfiguration successful\x1b[0m, use the following command to skip it in the \
+         future:\n\n{}\n",
+        config
+    );
 
     let api = HidApi::new().expect("unable to access HID");
     let device = match api.open(VENDOR_ID, PRODUCT_ID) {
@@ -273,10 +309,7 @@ fn main() {
         die!("unable to apply new config: {}", err);
     }
 
-    // TODO: Move before HID access in case of failure
-    // TODO: Omit if all parameters were specified as parameters already
     println!("\x1b[32mSuccessfully applied changes.\x1b[0m\n");
-    println!("The following command will reapply your config:\n\n{}", config);
 }
 
 /// Read config from command line.
@@ -347,12 +380,11 @@ fn cli() -> Config {
 
     config.zone = required_enum(&matches, "zone", &Zone::variants());
 
-    config.color = required_from_str(&matches, "color", "0xRRGGBB");
+    config.color = required_color(&matches);
 
     config.effect = required_enum(&matches, "effect", &Effect::variants());
 
-    config.max_brightness = required_from_str(&matches, "max-brightness", "[0..=255]");
-
+    replace_from_str(&mut config.max_brightness, &matches, "max-brightness");
     replace_from_str(&mut config.min_brightness, &matches, "min-brightness");
     replace_from_str(&mut config.fade_in_time, &matches, "fade-in-time");
     replace_from_str(&mut config.fade_out_time, &matches, "fade-out-time");
@@ -378,17 +410,17 @@ fn replace_from_str<T: FromStr>(option: &mut T, matches: &ArgMatches, name: &str
     }
 }
 
-/// Get a required config option from CLI or STDIN.
-fn required_from_str<T: FromStr>(matches: &ArgMatches, name: &str, format: &str) -> T {
-    match cli_from_str(matches, name) {
+/// Read the color option from CLI or prompt for STDIN if not present.
+fn required_color<T: FromStr>(matches: &ArgMatches) -> T {
+    match cli_from_str(matches, "color") {
         Some(Ok(value)) => return value,
-        Some(Err(_)) => eprintln!("\x1b[31mInvalid CLI {} parameter.\x1b[0m\n", name),
+        Some(Err(_)) => eprintln!("\x1b[31mInvalid CLI color parameter.\x1b[0m\n"),
         _ => (),
     }
 
     loop {
         // Query the user for the option.
-        print!("Please select a {} (format: {}):\n > ", name, format);
+        print!("Please select a color (format: 0xRRGGBB):\n > ");
         let _ = io::stdout().flush();
 
         let input = stdin_nextline();
@@ -399,14 +431,14 @@ fn required_from_str<T: FromStr>(matches: &ArgMatches, name: &str, format: &str)
                 break value;
             },
             Err(_) => eprintln!(
-                "\x1b[31mValue '{}' does not match format {}, please try again.\x1b[0m\n",
-                input, format
+                "\x1b[31mColor '{}' does not match format 0xRRGGBB, please try again.\x1b[0m\n",
+                input
             ),
         }
     }
 }
 
-/// Get a required config enum option.
+/// Read an enum option from CLI or prompt for STDIN if not present.
 fn required_enum<T>(matches: &ArgMatches, name: &str, variants: &[&str]) -> T
 where
     T: FromStr,
