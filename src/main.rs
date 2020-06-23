@@ -1,13 +1,16 @@
-use std::fmt::Debug;
+//! RGB Fusion CLI tool
+//!
+//! The Gigabyte RGB Fusion 2 HID protocol information is documentad at
+//! https://gitlab.com/CalcProgrammer1/OpenRGB/-/wikis/Gigabyte-RGB-Fusion-2.0.
+
+use std::fmt::{self, Debug, Display, Formatter};
 use std::io::{self, Write};
-///! RGB Fusion CLI tool
-///
-/// The Gigabyte RGB Fusion 2 HID protocol information is documentad at
-/// https://gitlab.com/CalcProgrammer1/OpenRGB/-/wikis/Gigabyte-RGB-Fusion-2.0.
+use std::num::ParseIntError;
+use std::process::exit;
 use std::str::FromStr;
 
 use bytes::{BufMut, BytesMut};
-use clap::{arg_enum, crate_authors, crate_description, crate_name, crate_version, App, Arg};
+use clap::{arg_enum, crate_description, crate_name, crate_version, App, Arg, ArgMatches};
 use hidapi::HidApi;
 
 const VENDOR_ID: u16 = 0x048d;
@@ -19,6 +22,38 @@ const fn apply_packet() -> [u8; 23] {
     packet[1] = 0x28;
     packet[2] = 0xff;
     packet
+}
+
+macro_rules! die {
+    ($($arg:tt)*) => {{
+        eprintln!($($arg)*);
+        exit(1);
+    }}
+}
+
+arg_enum! {
+    /// Color effect.
+    #[derive(Debug, Copy, Clone)]
+    enum Effect {
+        Off = 0,
+        Static = 1,
+        Pulse = 2,
+        Flash = 3,
+        Cycle = 4,
+    }
+}
+
+arg_enum! {
+    /// RGB zones.
+    #[derive(Debug, Copy, Clone)]
+    enum Zone {
+        IO = 0x2001,
+        CPU = 0x2102,
+        SID = 0x2308,
+        CX = 0x2410,
+        LED0 = 0x2520,
+        LED1 = 0x2640,
+    }
 }
 
 /// TODO: Doc
@@ -47,34 +82,15 @@ impl FromStr for Rgb {
                 color >>= 8;
                 let r = color as u8;
                 Ok(Rgb { r, g, b })
-            }
+            },
             Err(_) => Err(()),
         }
     }
 }
 
-arg_enum! {
-    /// Color effect.
-    #[derive(Debug, Copy, Clone)]
-    enum Effect {
-        Off = 0,
-        Static = 1,
-        Pulse = 2,
-        Flash = 3,
-        Cycle = 4,
-    }
-}
-
-arg_enum! {
-    /// RGB zones.
-    #[derive(Debug, Copy, Clone)]
-    enum Zone {
-        IO = 0x2001,
-        CPU = 0x2102,
-        SID = 0x2308,
-        CX = 0x2410,
-        LED0 = 0x2520,
-        LED1 = 0x2640,
+impl Display for Rgb {
+    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
+        write!(f, "0x{:02x}{:02x}{:02x}", self.r, self.g, self.b)
     }
 }
 
@@ -91,6 +107,20 @@ impl Brightness {
     }
 }
 
+impl FromStr for Brightness {
+    type Err = ParseIntError;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        Ok(Brightness(u8::from_str(s)?))
+    }
+}
+
+impl Display for Brightness {
+    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
+        write!(f, "{}", self.0)
+    }
+}
+
 /// Duration in milliseconds.
 #[derive(Copy, Clone)]
 struct Duration(u16);
@@ -101,6 +131,20 @@ impl Duration {
     /// Convert from milliseconds to quarter seconds.
     fn as_bytes(self) -> u16 {
         self.0 / 250
+    }
+}
+
+impl FromStr for Duration {
+    type Err = ParseIntError;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        Ok(Duration(u16::from_str(s)?))
+    }
+}
+
+impl Display for Duration {
+    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
+        write!(f, "{}", self.0)
     }
 }
 
@@ -182,22 +226,57 @@ impl Default for Config {
     }
 }
 
-// TODO: Better errors
+impl Display for Config {
+    #[rustfmt::skip]
+    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
+        // TODO: Omit optional parameters matching the defaults
+        write!(
+            f,
+            "  {} \\\n    \
+            --zone {} \\\n    \
+            --color {} \\\n    \
+            --effect {} \\\n    \
+            --max-brightness {} \\\n    \
+            --min-brightness {} \\\n    \
+            --fade-in-time {} \\\n    \
+            --fade-out-time {} \\\n    \
+            --hold-time {}",
+            crate_name!(),
+            self.zone,
+            self.color,
+            self.effect,
+            self.max_brightness,
+            self.min_brightness,
+            self.fade_in_time,
+            self.fade_out_time,
+            self.hold_time
+        )
+    }
+}
+
+// TODO: Add colortest mode to check zone
+//  -> Maybe even allow interactively selecting the zone?
 fn main() {
     let config = cli();
 
     let api = HidApi::new().expect("unable to access HID");
-    let device = api
-        .open(VENDOR_ID, PRODUCT_ID)
-        .expect("unable to access device");
+    let device = match api.open(VENDOR_ID, PRODUCT_ID) {
+        Ok(device) => device,
+        Err(err) => die!("unable to open device: {} (root permissions required)", err),
+    };
 
-    device
-        .write(&config.as_bytes())
-        .expect("unable to write effects package");
+    if let Err(err) = device.write(&config.as_bytes()) {
+        die!("unable to write new config: {}", err);
+    }
 
-    device
-        .write(&apply_packet())
-        .expect("unable to apply changes");
+    if let Err(err) = device.write(&apply_packet()) {
+        die!("unable to apply new config: {}", err);
+    }
+
+    // TODO: Move before HID access in case of failure
+    // TODO: Omit if all parameters were specified as parameters already
+    println!("\x1b[32mSuccessfully applied changes.\x1b[0m\n");
+    println!("The following command will reapply your config:\n\n{}", config);
 }
 
 /// Read config from command line.
@@ -266,60 +345,77 @@ fn cli() -> Config {
 
     let mut config = Config::default();
 
-    // TODO: Read from stdin when not available
-    let color_str = matches.value_of("color").expect("missing color");
-    config.color = match Rgb::from_str(color_str) {
-        Ok(color) => color,
-        _ => panic!("Invalid color '{}'.", color_str),
-    };
+    config.zone = required_enum(&matches, "zone", &Zone::variants());
 
-    config.effect = match matches.value_of("effect") {
-        Some(effect) => Effect::from_str(effect).unwrap(),
-        None => enum_stdin::<Effect>("Effect", &Effect::variants()),
-    };
+    config.color = required_from_str(&matches, "color", "0xRRGGBB");
 
-    if let Some(time) = matches.value_of("fade-in-time").and_then(|time| u16::from_str(time).ok()) {
-        config.fade_in_time = Duration(time);
-    }
+    config.effect = required_enum(&matches, "effect", &Effect::variants());
 
-    if let Some(time) = matches.value_of("fade-out-time").and_then(|time| u16::from_str(time).ok()) {
-        config.fade_out_time = Duration(time);
-    }
+    config.max_brightness = required_from_str(&matches, "max-brightness", "[0..=255]");
 
-    if let Some(time) = matches.value_of("hold-time").and_then(|time| u16::from_str(time).ok()) {
-        config.hold_time = Duration(time);
-    }
-
-    // TODO: Read from stdin when not available
-    let max_brightness_str = matches
-        .value_of("max-brightness")
-        .expect("missing max brightness");
-    config.max_brightness = match u8::from_str(max_brightness_str) {
-        Ok(max_brightness) => Brightness(max_brightness),
-        _ => panic!("Invalid brightness '{}'.", max_brightness_str),
-    };
-
-    if let Some(brightness) = matches
-        .value_of("min-brightness")
-        .and_then(|mb| u8::from_str(mb).ok())
-    {
-        config.min_brightness = Brightness(brightness);
-    }
-
-    config.zone = match matches.value_of("zone") {
-        Some(zone) => Zone::from_str(zone).unwrap(),
-        None => enum_stdin::<Zone>("Zone", &Zone::variants()),
-    };
+    replace_from_str(&mut config.min_brightness, &matches, "min-brightness");
+    replace_from_str(&mut config.fade_in_time, &matches, "fade-in-time");
+    replace_from_str(&mut config.fade_out_time, &matches, "fade-out-time");
+    replace_from_str(&mut config.hold_time, &matches, "hold-time");
 
     config
 }
 
-/// Read enum from STDIN.
-fn enum_stdin<T>(name: &str, variants: &[&str]) -> T
+/// Convert a CLI option from the parameter string.
+#[inline]
+fn cli_from_str<T>(matches: &ArgMatches, name: &str) -> Option<Result<T, <T as FromStr>::Err>>
+where
+    T: FromStr,
+{
+    matches.value_of(name).map(|value| T::from_str(value))
+}
+
+/// Replace config value with the CLI parameter if it is present.
+#[inline]
+fn replace_from_str<T: FromStr>(option: &mut T, matches: &ArgMatches, name: &str) {
+    if let Some(Ok(value)) = cli_from_str(matches, name) {
+        *option = value;
+    }
+}
+
+/// Get a required config option from CLI or STDIN.
+fn required_from_str<T: FromStr>(matches: &ArgMatches, name: &str, format: &str) -> T {
+    match cli_from_str(matches, name) {
+        Some(Ok(value)) => return value,
+        Some(Err(_)) => eprintln!("\x1b[31mInvalid CLI {} parameter.\x1b[0m\n", name),
+        _ => (),
+    }
+
+    loop {
+        // Query the user for the option.
+        print!("Please select a {} (format: {}):\n > ", name, format);
+        let _ = io::stdout().flush();
+
+        let input = stdin_nextline();
+
+        match T::from_str(&input) {
+            Ok(value) => {
+                println!("");
+                break value;
+            },
+            Err(_) => eprintln!(
+                "\x1b[31mValue '{}' does not match format {}, please try again.\x1b[0m\n",
+                input, format
+            ),
+        }
+    }
+}
+
+/// Get a required config enum option.
+fn required_enum<T>(matches: &ArgMatches, name: &str, variants: &[&str]) -> T
 where
     T: FromStr,
     <T as FromStr>::Err: Debug,
 {
+    if let Some(Ok(value)) = cli_from_str(matches, name) {
+        return value;
+    }
+
     loop {
         // Offer all available zones.
         println!("[{}] Please select a number:", name);
@@ -329,18 +425,26 @@ where
         print!(" > ");
         let _ = io::stdout().flush();
 
-        // Read user input.
-        let mut input = String::new();
-        let _ = io::stdin().read_line(&mut input);
-        input = input.trim().to_string();
+        let input = stdin_nextline();
 
-        match usize::from_str(&input)
-            .ok()
-            .and_then(|index| variants.get(index))
-        {
-            Some(variant) => break T::from_str(variant).unwrap(),
+        match usize::from_str(&input).ok().and_then(|index| variants.get(index)) {
+            Some(variant) => {
+                println!("");
+                break T::from_str(variant).unwrap();
+            },
             // Query again if the zone is not valid.
-            _ => println!("Variant '{}' does not exist, please try again.\n", input),
+            _ => println!("\x1b[31mVariant '{}' does not exist, please try again.\x1b[0m\n", input),
         }
     }
+}
+
+/// Read next line from STDIN.
+#[inline]
+fn stdin_nextline() -> String {
+    let mut input = String::new();
+
+    let _ = io::stdin().read_line(&mut input);
+    input = input.trim().to_string();
+
+    input
 }
