@@ -49,7 +49,7 @@ trait AsBytes {
 
 arg_enum! {
     /// Color effect.
-    #[derive(Debug, Copy, Clone)]
+    #[derive(PartialEq, Eq, Debug, Copy, Clone)]
     enum Effect {
         Off = 0,
         Static = 1,
@@ -200,10 +200,15 @@ impl Config {
             || !matches.is_present("effect");
 
         config.zone = required_enum(matches, "zone", &Zone::variants());
-        config.color = required_color(matches);
-
-        // TODO: Check effect before color and skip color if effect == Off
         config.effect = required_enum(matches, "effect", &Effect::variants());
+
+        if config.effect != Effect::Off {
+            config.color = required_color(matches);
+        }
+
+        config.interactive = !matches.is_present("zone")
+            || !matches.is_present("effect")
+            || (!matches.is_present("color") && config.effect != Effect::Off);
 
         replace_from_str(&mut config.max_brightness, matches, "max-brightness");
         replace_from_str(&mut config.min_brightness, matches, "min-brightness");
@@ -212,6 +217,22 @@ impl Config {
         replace_from_str(&mut config.hold_time, matches, "hold-time");
 
         config
+    }
+}
+
+impl Default for Config {
+    fn default() -> Self {
+        Self {
+            zone: Zone::IO,
+            effect: Effect::Static,
+            max_brightness: Brightness::max_value(),
+            min_brightness: Brightness::default(),
+            color: Rgb::default(),
+            fade_in_time: Duration::default(),
+            fade_out_time: Duration::default(),
+            hold_time: Duration::default(),
+            interactive: false,
+        }
     }
 }
 
@@ -264,22 +285,6 @@ impl AsBytes for Config {
     }
 }
 
-impl Default for Config {
-    fn default() -> Self {
-        Self {
-            zone: Zone::IO,
-            effect: Effect::Static,
-            max_brightness: Brightness::max_value(),
-            min_brightness: Brightness::default(),
-            color: Rgb::default(),
-            fade_in_time: Duration::default(),
-            fade_out_time: Duration::default(),
-            hold_time: Duration::default(),
-            interactive: false,
-        }
-    }
-}
-
 impl Display for Config {
     #[rustfmt::skip]
     fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
@@ -288,17 +293,26 @@ impl Display for Config {
             f,
             "{} \\\n  \
             --zone {} \\\n  \
-            --color {} \\\n  \
             --effect {}",
             crate_name!(),
             self.zone,
-            self.color,
             self.effect,
         )?;
 
-        // Add optional parameters only if present.
+        // Omit everything if effect is `Off`.
+        if self.effect == Effect::Off {
+            return Ok(());
+        }
+
+        write!(f, " \\\n  --color {}", self.color)?;
+
         if self.max_brightness != Brightness::max_value() {
             write!(f, " \\\n  --max-brightness {}", self.max_brightness)?;
+        }
+
+        // Omit effect config if the color is configured to be static.
+        if self.effect == Effect::Static {
+            return Ok(());
         }
 
         if self.min_brightness != Brightness::default() {
